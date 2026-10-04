@@ -21,14 +21,15 @@
 //! script code, so a journal is bound to the exact script that produced it.
 //! This is correct for the primary replay use case (re-running the same
 //! script); for edit-and-retry, the signature won't verify and the server
-//! falls back to fresh execution (the safe default).
+//! rejects the replay before executing the script. Starting an edited script
+//! requires a new execution without the old journal.
 //!
 //! The signing key should be injected at server startup (via
 //! `ERYX_JOURNAL_SIGNING_KEY`) so that all replicas share the same key and
 //! journals are portable across instances. If no key is configured, a random
 //! ephemeral key is generated and a warning is logged — previously-signed
 //! journals (or those from other replicas) will fail verification and replay
-//! will fall back to fresh execution.
+//! will be rejected before execution.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

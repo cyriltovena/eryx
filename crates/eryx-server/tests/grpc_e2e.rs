@@ -37,6 +37,10 @@ use tonic::transport::{Channel, Server};
 
 /// Start an in-process gRPC server on a random port and return the channel.
 async fn start_server() -> Channel {
+    start_server_with_signer(eryx_server::replay::JournalSigner::random()).await
+}
+
+async fn start_server_with_signer(signer: eryx_server::replay::JournalSigner) -> Channel {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -53,7 +57,7 @@ async fn start_server() -> Channel {
 
     tokio::spawn(async move {
         Server::builder()
-            .add_service(EryxServer::new(EryxService::new(pool)))
+            .add_service(EryxServer::new(EryxService::with_signer(pool, signer)))
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
             .unwrap();
@@ -1474,7 +1478,8 @@ fn echo_declaration() -> CallbackDeclaration {
 /// that journal replays it — the server never dispatches the callback again.
 #[tokio::test]
 async fn replay_across_requests_skips_live_callback() {
-    let channel = start_server().await;
+    let signer = eryx_server::replay::JournalSigner::from_key([3; 32]);
+    let channel = start_server_with_signer(signer.clone()).await;
     let mut client = EryxClient::new(channel);
 
     let code = r#"
@@ -1545,7 +1550,8 @@ print(f"got: {result}")
     assert_eq!(journal.entries.len(), 1, "one callback journaled");
     assert_eq!(journal.entries[0].name, "echo");
 
-    // ---- Run 2: replay from the recorded journal — no callback dispatched. ----
+    // A replacement with the same key must preserve completed callbacks.
+    let mut client = EryxClient::new(start_server_with_signer(signer).await);
     let (tx2, rx2) = mpsc::channel(16);
     tx2.send(ClientMessage {
         message: Some(client_message::Message::ExecuteRequest(Box::new(
@@ -1886,4 +1892,67 @@ print("should not reach here")
         }
     }
     assert!(got_result, "never received ExecuteResult");
+}
+
+/// Invalid replay must fail before the RPC can expose any script output or
+/// callback. Otherwise a replica/key change can repeat already-completed work.
+#[tokio::test]
+async fn rejects_invalid_replay_before_execution() {
+    use eryx_server::proto::eryx::v1::CallbackJournalEntry;
+    use eryx_server::replay::JournalSigner;
+
+    let signer = JournalSigner::from_key([7; 32]);
+    let channel = start_server_with_signer(signer.clone()).await;
+    let mut client = EryxClient::new(channel);
+    let code = "print('script must not execute')";
+    let original = CallbackJournal {
+        entries: vec![CallbackJournalEntry {
+            name: "echo".to_string(),
+            args_json: "{}".to_string(),
+            value: "42".to_string(),
+            ..Default::default()
+        }],
+        signature: vec![],
+    };
+    for scenario in [
+        "unsigned",
+        "other replica",
+        "empty signed journal",
+        "changed script",
+        "changed result",
+    ] {
+        let mut journal = original.clone();
+        match scenario {
+            "unsigned" => {}
+            "other replica" => JournalSigner::from_key([8; 32]).sign(&mut journal, code),
+            "empty signed journal" => {
+                journal.entries.clear();
+                JournalSigner::from_key([8; 32]).sign(&mut journal, code);
+            }
+            "changed script" => signer.sign(&mut journal, "different script"),
+            "changed result" => {
+                signer.sign(&mut journal, code);
+                journal.entries[0].value = "43".to_string();
+            }
+            _ => unreachable!(),
+        }
+        let (tx, rx) = mpsc::channel(1);
+        tx.send(ClientMessage {
+            message: Some(client_message::Message::ExecuteRequest(Box::new(
+                ExecuteRequest {
+                    code: code.to_string(),
+                    callback_journal: Some(journal),
+                    ..Default::default()
+                },
+            ))),
+        })
+        .await
+        .unwrap();
+        let error = client.execute(ReceiverStream::new(rx)).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
+        assert!(
+            error.message().contains("replay was not executed"),
+            "{scenario}"
+        );
+    }
 }

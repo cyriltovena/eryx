@@ -152,7 +152,10 @@ Replayed journal entries are returned to Python **verbatim** — the server does
 The server signs every outgoing journal with **HMAC-SHA256** (`CallbackJournal.signature`). The MAC covers both the journal entries and the script `code`, so a signature binds a journal to the exact script that produced it. On an incoming replay request the server:
 
 - **Verifies** the signature against the request's `code` before matching.
-- **Discards the entries** of an unsigned, mis-signed, or wrong-script journal and falls back to fresh execution. This is a safe fallback, **not an error** — an edited script simply re-runs everything live.
+- **Rejects** an unsigned non-empty, mis-signed, or wrong-script journal with `FAILED_PRECONDITION` before executing Python. A rejected replay never becomes a fresh run: completed callbacks may already have produced external effects.
+- Accepts an empty, unsigned journal to start a new journaling session. An empty journal that carries a signature must still pass verification.
+
+To run an edited script, explicitly start a new execution without the old journal.
 
 Configure the signing key explicitly so journals are portable:
 
@@ -162,7 +165,7 @@ export ERYX_JOURNAL_SIGNING_KEY=$(openssl rand -hex 32)
 eryx-server
 ```
 
-All replicas must share the same key for journals to verify across instances. **If no key is configured, the server generates a random ephemeral key and logs a warning** — journals then fail verification after a restart or on another replica, and replay silently falls back to fresh execution.
+All replicas must share the same key for journals to verify across instances. **If no key is configured, the server generates a random ephemeral key and logs a warning** — journals then fail verification after a restart or on another replica, and replay is rejected before execution.
 
 Signing provides **provenance and tamper detection**; it does not (and cannot) stop a callback-answering client from choosing arbitrary values live — it always could. See [Security: journals are a trusted input](./callback-replay.md#security-journals-are-a-trusted-input) for the full discussion.
 

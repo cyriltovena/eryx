@@ -116,8 +116,9 @@ message ExecuteRequest {
   // cannot) prevent the callback-answering client from choosing arbitrary
   // values live — it always could. What it provides is provenance and tamper
   // detection for journals that round-trip through storage or intermediaries.
-  // The server rejects unsigned or mis-signed journals by discarding their
-  // entries (falling back to fresh execution, not an error).
+  // The server rejects non-empty unsigned or mis-signed journals with
+  // FAILED_PRECONDITION before executing the script. An empty, unsigned journal
+  // starts a new journaling session and does not require a signature.
   CallbackJournal callback_journal = 14;
 }
 
@@ -302,8 +303,9 @@ message CallbackJournalEntry {
 //
 // SECURITY: a valid signature attests that this journal is an unmodified record
 // of a real execution of a specific script on a server holding the signing key.
-// The server signs outgoing journals and rejects unsigned or mis-signed ones by
-// discarding their entries (falling back to fresh execution). The MAC covers
+// The server signs outgoing journals and rejects unsigned or mis-signed
+// journals before execution with FAILED_PRECONDITION (except an empty, unsigned
+// journal starting a new session). The MAC covers
 // both the entries and the script code, so a journal cannot be replayed against
 // a different script.
 //

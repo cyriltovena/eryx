@@ -126,23 +126,22 @@ impl crate::proto::eryx::v1::eryx_server::Eryx for EryxService {
         let result_variable = execute_req.result_variable;
         let scrub_result = execute_req.scrub_result;
 
-        // Callback-result replay: presence of the journal field (even empty)
-        // opts this execution into journaling; its entries seed replay.
-        // Non-empty journals must pass HMAC verification (bound to `code`) — a
-        // failed check discards the entries (falling back to fresh journaling,
-        // not an error). This also catches journals from a different script.
-        let previous_journal: Option<CallbackJournal> =
-            execute_req.callback_journal.as_ref().map(|j| {
-                if !j.entries.is_empty() && !self.journal_signer.verify(j, &code) {
-                    tracing::warn!(
-                        entries = j.entries.len(),
-                        "callback journal signature verification failed — ignoring entries"
-                    );
-                    CallbackJournal::new(&code)
-                } else {
-                    crate::replay::journal_from_proto(&code, j)
+        // A rejected replay must not become a fresh run: completed callbacks
+        // and direct script effects may already have happened.
+        let previous_journal: Option<CallbackJournal> = execute_req
+            .callback_journal
+            .as_ref()
+            .map(|journal| {
+                if (!journal.entries.is_empty() || !journal.signature.is_empty())
+                    && !self.journal_signer.verify(journal, &code)
+                {
+                    return Err(Status::failed_precondition(
+                        "callback journal signature verification failed; replay was not executed",
+                    ));
                 }
-            });
+                Ok(crate::replay::journal_from_proto(&code, journal))
+            })
+            .transpose()?;
 
         // Parse network config: present = networking enabled, absent = disabled.
         let net_config = execute_req.network_config.map(|nc| {
