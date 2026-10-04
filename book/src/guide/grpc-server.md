@@ -38,6 +38,12 @@ Every flag also has an environment variable, so the server is easy to configure 
 | `--tls-key` | `ERYX_TLS_KEY` | *(off)* | PEM private key for `--tls-cert`. |
 | `--tls-client-ca` | `ERYX_TLS_CLIENT_CA` | *(off)* | PEM CA bundle to verify client certs; enables mutual TLS. See [Transport security](#transport-security-tls--mtls). |
 
+### Shutdown
+
+On Unix, SIGTERM or SIGINT stops the gRPC listener and drains existing RPCs before the process exits. Active Python execution and callback replies can finish over their existing streams. Ctrl-C also initiates shutdown on other platforms.
+
+Set the container or pod termination grace period to cover the request's execution and callback deadlines, any pre-stop delay, and telemetry shutdown. The server does not impose an additional drain timeout. A forced kill or client disconnection can still interrupt execution; draining does not make an uncommitted result recoverable or permit replaying external actions.
+
 ## The Execute RPC
 
 The service exposes a single method:

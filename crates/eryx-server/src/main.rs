@@ -126,6 +126,28 @@ fn spawn_pool_stats_recorder(pool: Arc<SandboxPool>) {
     });
 }
 
+fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
+    Ok(async move {
+        #[cfg(unix)]
+        let terminate_signal = async { terminate.recv().await };
+        #[cfg(not(unix))]
+        let terminate_signal = std::future::pending::<Option<()>>();
+
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    tracing::error!(%error, "failed to listen for interrupt; shutting down");
+                }
+            }
+            _ = terminate_signal => {}
+        }
+        tracing::info!("draining active gRPC calls before shutdown");
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tracer_provider = setup_tracing()?;
@@ -231,7 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     server
         .add_service(EryxServer::new(service))
-        .serve(addr)
+        .serve_with_shutdown(addr, shutdown_signal()?)
         .await?;
 
     if let Some(provider) = tracer_provider
