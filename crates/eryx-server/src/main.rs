@@ -9,7 +9,8 @@ use eryx::{PoolConfig, Sandbox, SandboxPool};
 use eryx_server::proto::eryx::v1::eryx_server::EryxServer;
 use eryx_server::service::EryxService;
 use eryx_server::telemetry::setup_tracing;
-use tonic::transport::server::ServerTlsConfig;
+use futures::StreamExt;
+use tonic::transport::server::{ServerTlsConfig, TcpIncoming};
 use tonic::transport::{Certificate, Identity, Server};
 
 /// gRPC server for sandboxed Python execution via eryx.
@@ -273,9 +274,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Tonic keeps its listener open until every connection drains, so the
+    // kernel would keep completing handshakes nobody serves. End the incoming
+    // stream on shutdown instead, which drops the listener, and only then let
+    // tonic start draining.
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel::<()>();
+    let listener = TcpIncoming::bind(addr)?.with_nodelay(Some(true));
+    let incoming = futures::stream::unfold(
+        (listener, Box::pin(shutdown_signal()?), stopped_tx),
+        |(mut listener, mut shutdown, stopped_tx)| async move {
+            tokio::select! {
+                conn = listener.next() => Some((conn?, (listener, shutdown, stopped_tx))),
+                () = &mut shutdown => None,
+            }
+        },
+    );
+
     server
         .add_service(EryxServer::new(service))
-        .serve_with_shutdown(addr, shutdown_signal()?)
+        .serve_with_incoming_shutdown(incoming, async {
+            let _ = stopped_rx.await;
+        })
         .await?;
 
     if let Some(provider) = tracer_provider

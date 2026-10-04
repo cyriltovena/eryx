@@ -25,6 +25,7 @@ prost.workspace = true
 rand.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+futures.workspace = true
 tokio = { workspace = true } #unified
 tokio-stream.workspace = true
 tokio-util.workspace = true
