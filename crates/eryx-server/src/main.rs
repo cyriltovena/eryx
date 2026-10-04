@@ -126,25 +126,47 @@ fn spawn_pool_stats_recorder(pool: Arc<SandboxPool>) {
     });
 }
 
+/// Wait for the next SIGINT (Ctrl-C) or, on Unix, SIGTERM.
+async fn next_signal(#[cfg(unix)] terminate: &mut tokio::signal::unix::Signal) {
+    #[cfg(unix)]
+    let terminate_signal = terminate.recv();
+    #[cfg(not(unix))]
+    let terminate_signal = std::future::pending::<Option<()>>();
+
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result {
+                tracing::error!(%error, "failed to listen for interrupt; shutting down");
+            }
+        }
+        _ = terminate_signal => {}
+    }
+}
+
 fn shutdown_signal() -> std::io::Result<impl Future<Output = ()>> {
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     Ok(async move {
-        #[cfg(unix)]
-        let terminate_signal = async { terminate.recv().await };
-        #[cfg(not(unix))]
-        let terminate_signal = std::future::pending::<Option<()>>();
+        next_signal(
+            #[cfg(unix)]
+            &mut terminate,
+        )
+        .await;
+        tracing::info!("draining active gRPC calls before shutdown; signal again to force exit");
 
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => {
-                if let Err(error) = result {
-                    tracing::error!(%error, "failed to listen for interrupt; shutting down");
-                }
-            }
-            _ = terminate_signal => {}
-        }
-        tracing::info!("draining active gRPC calls before shutdown");
+        // Tokio's handlers replace the default disposition for the life of the
+        // process, so without this a second signal could not interrupt a drain
+        // stuck on an RPC that never finishes.
+        tokio::spawn(async move {
+            next_signal(
+                #[cfg(unix)]
+                &mut terminate,
+            )
+            .await;
+            tracing::warn!("received second shutdown signal; exiting without draining");
+            std::process::exit(1);
+        });
     })
 }
 
